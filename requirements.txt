@@ -1,0 +1,21 @@
+# UDNA SDK Requirements
+# Universal DID-Native Addressing Software Development Kit
+
+# Core cryptography library for Ed25519 key operations
+cryptography>=41.0.0
+
+# Base58 encoding/decoding for addresses and keys
+base58>=2.1.0
+
+# Optional: For advanced HTTP DID methods (did:web)
+# aiohttp>=3.8.0
+
+# Optional: For development and testing
+# pytest>=7.0.0
+# pytest-cov>=4.0.0
+# black>=23.0.0
+# mypy>=1.0.0
+# flake8>=6.0.0
+
+# Optional: For performance monitoring
+# psutil>=5.9.0
