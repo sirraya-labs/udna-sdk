@@ -434,7 +434,7 @@ If you use this SDK in research or production, please cite:
   title = {Sirraya Labs UDNA SDK},
   author = {Sirraya Labs},
   year = {2026},
-  url = {https://github.com/sirrayalabs/udna-sdk},
+  url = {https://github.com/sirraya-labs/udna-sdk},
   note = {W3C Universal DID-Native Addressing Implementation}
 }
 ```

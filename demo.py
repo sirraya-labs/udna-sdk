@@ -13,6 +13,8 @@ print("=" * 60)
 # Initialize SDK
 sdk = UdnaSDK()
 
+private_key_export = sdk.export_private_key(did.did, format="pem")
+
 # Create a DID
 print("\n[1] Creating DID...")
 did = sdk.create_did()
