@@ -796,8 +796,8 @@ Contributions are welcome. Please follow these guidelines:
 ## Support
 
 - **Documentation**: [https://docs.sirraya.org/udna-sdk](https://docs.sirraya.org/udna-sdk)
-- **Issues**: [GitHub Issues](https://github.com/sirrayalabs/udna-sdk/issues)
-- **Email**: [udna@sirraya.org](mailto:udna@sirraya.org)
+- **Issues**: [GitHub Issues](https://github.com/sirraya-labs/udna-sdk/issues)
+- **Email**: [amir@sirraya.org](mailto:amir@sirraya.org)
 
 ---
 
