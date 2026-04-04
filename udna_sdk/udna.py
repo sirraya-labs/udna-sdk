@@ -13,6 +13,7 @@ import time
 import struct
 import secrets
 import base58
+from enum import Enum
 from typing import Dict, List, Optional, Tuple, Union
 from dataclasses import dataclass, asdict
 from cryptography.hazmat.primitives import hashes, serialization
