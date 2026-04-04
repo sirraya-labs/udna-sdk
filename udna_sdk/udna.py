@@ -24,6 +24,30 @@ import hmac
 # Core Data Structures
 # ============================================================================
 
+# Add this after the imports section (around line 20)
+
+class AddressFlags(Enum):
+    """Standard UDNA address flags"""
+    DEFAULT = 0
+    MESSAGING_ENABLED = 1
+    ROUTING_ENABLED = 2
+    EPHEMERAL = 4
+    PRIORITY_HIGH = 8
+    ENCRYPTED = 16
+    
+    @classmethod
+    def from_string(cls, flag_str: str) -> 'AddressFlags':
+        """Convert string to flag enum"""
+        mapping = {
+            'default': cls.DEFAULT,
+            'messaging': cls.MESSAGING_ENABLED,
+            'routing': cls.ROUTING_ENABLED,
+            'ephemeral': cls.EPHEMERAL,
+            'priority': cls.PRIORITY_HIGH,
+            'encrypted': cls.ENCRYPTED
+        }
+        return mapping.get(flag_str.lower(), cls.DEFAULT)
+
 @dataclass
 class Did:
     """Decentralized Identifier representation"""

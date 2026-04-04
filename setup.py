@@ -6,7 +6,7 @@ with open("README.md", "r", encoding="utf-8") as fh:
 setup(
     # Package name (PyPI)
     name="sirraya-udna-sdk",
-    version="1.0.1",
+    version="1.0.2",
     
     # Author information
     author="Sirraya Labs",
@@ -18,7 +18,7 @@ setup(
     long_description_content_type="text/markdown",
     
     # URLs
-    url="https://github.com/sirrayalabs/udna-sdk",
+    url="https://github.com/sirraya-labs/udna-sdk",
     project_urls={
         "Documentation": "https://docs.sirraya.org/udna-sdk",
         "Source": "https://github.com/sirraya-labs/udna-sdk",
