@@ -1,0 +1,8 @@
+{
+  "did": "did:key:z6Mkp2K8pxfAoNWh7ZjYzwLLnMbjpuuSBeXVLHc862z5q7Xw",
+  "method": "key",
+  "identifier": "z6Mkp2K8pxfAoNWh7ZjYzwLLnMbjpuuSBeXVLHc862z5q7Xw",
+  "private_key_pem": "-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VwBCIEIJ2yeb7CkyORCLO/eFZQc2B1AuhGKO2HL0/NTgfQBwMf\n-----END PRIVATE KEY-----\n",
+  "exported_at": "2026-04-04T22:57:10.572402",
+  "version": "1.1.0"
+}

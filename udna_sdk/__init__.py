@@ -16,5 +16,5 @@ from .version import __version__
 __author__ = "Sirraya Labs"
 __copyright__ = "Copyright (c) 2026 Sirraya Labs"
 __license__ = "MIT"
-__version__ = "1.0.2"
+__version__ = "1.0.4"
 __credits__ = ["Based on W3C Universal DID-Native Addressing specification"]
