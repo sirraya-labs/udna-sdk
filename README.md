@@ -775,8 +775,6 @@ twine upload dist/*
 
 ## License
 
-MIT License - Copyright (c) 2026 Sirraya Labs
-
 See [LICENSE](LICENSE) file for details.
 
 ---
@@ -801,14 +799,7 @@ Contributions are welcome. Please follow these guidelines:
 
 ---
 
-## Acknowledgments
 
-- W3C DID Working Group for the DID Core specification
-- Decentralized Identity Foundation (DIF) for standards guidance
-- Python cryptography team for Ed25519 implementation
-- Noise Protocol Framework for secure channel specification
-
----
 
 ## Citation
 
@@ -817,7 +808,7 @@ If you use this SDK in research or production, please cite:
 ```bibtex
 @software{sirraya_udna_sdk_2026,
   title = {Sirraya Labs UDNA SDK},
-  author = {Sirraya Labs},
+  author = {Amir Hameed Mir, Sirraya Labs},
   year = {2026},
   version = {1.1.0},
   url = {https://github.com/sirraya-labs/udna-sdk},
@@ -825,8 +816,5 @@ If you use this SDK in research or production, please cite:
 }
 ```
 
----
 
-**Built by [Sirraya Labs](https://sirraya.org) | W3C Compliant | MIT Licensed**
-```
 

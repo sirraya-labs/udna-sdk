@@ -1,21 +1,45 @@
-MIT License
+Business Source License 1.1
 
-Copyright (c) 2026 Sirraya Labs
+Copyright (c) 2026 Amir Hameed Mir. All Rights Reserved.
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
+Developed and maintained by Sirraya Labs.
 
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
+License text copyright (c) 2017 MariaDB Corporation Ab. All Rights Reserved.
+"Business Source License" is a trademark of MariaDB Corporation Ab.
 
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
+Parameters
+
+Licensor:
+Amir Hameed Mir
+
+Licensed Work:
+Sirraya UDNA SDK, including all source code, libraries, cryptographic primitives, routing protocols, decentralized identity components, pairwise DID primitives, documentation, examples, and related materials contained within this repository.
+
+Change Date:
+July 1, 2029
+
+Change License:
+Apache License, Version 2.0
+
+Additional Use Grant
+
+You may use, copy, modify, build upon, and redistribute the Licensed Work for:
+
+Personal projects
+Academic and educational purposes
+Research
+Internal evaluation and testing
+Security research
+Non-commercial development
+
+Production deployment of the Licensed Work as part of a commercial, revenue-generating, managed, hosted, SaaS, enterprise, or customer-facing service requires a separate commercial license from the Licensor until the Change Date.
+
+Terms
+
+The Licensor grants you the right to copy, modify, create derivative works, redistribute, and make non-production use of the Licensed Work.
+
+Effective on the Change Date, or the fourth anniversary of the first publicly available release of a specific version of the Licensed Work (whichever occurs first), this version of the Licensed Work will automatically be licensed under the Apache License, Version 2.0.
+
+Any use of the Licensed Work in violation of these Terms or the Additional Use Grant immediately terminates the rights granted under this License for the current and all prior versions.
+
+THE LICENSED WORK IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, AND NONINFRINGEMENT. IN NO EVENT SHALL THE LICENSOR OR COPYRIGHT HOLDER BE LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT, OR OTHERWISE, ARISING FROM, OUT OF, OR IN CONNECTION WITH THE LICENSED WORK OR THE USE OR OTHER DEALINGS IN THE LICENSED WORK.
