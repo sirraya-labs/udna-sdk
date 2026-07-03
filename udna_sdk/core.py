@@ -1,11 +1,6 @@
 #!/usr/bin/env python3
 """
-UDNA SDK - Universal DID-Native Addressing Software Development Kit
-A comprehensive, production-ready SDK for integrating UDNA functionality.
 
-Version: 1.1.0
-License: MIT
-Author: Sirraya Labs
 
 Features:
 - DID generation (did:key, did:web methods)
@@ -16,9 +11,12 @@ Features:
 - Secure messaging with Noise protocol
 - File export/import for keys and identities
 - Command-line interface
+
 """
 
 import argparse
+import asyncio
+import concurrent.futures
 import hashlib
 import base58
 import secrets
@@ -35,25 +33,48 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ed25519
 
 # UDNA imports
-from .udna import (
-    Did,
-    DidKeyMethod,
-    DidWebMethod,
-    UdnaAddress,
-    DidResolver,
-    KeyRotationManager,
-    PairwiseDidManager,
-    NoiseHandshake,
-    SecureMessaging,
-    AddressFlags as UdnaAddressFlags
-)
+#
+# Fix: the previous version used only a relative import (`from .udna import
+# ...`), which requires udna_sdk.py to live inside a proper Python package
+# (i.e. imported as `some_package.udna_sdk`). If the SDK is distributed as
+# flat top-level modules -- e.g. `pip install sirraya-udna-sdk` followed by
+# `from udna_sdk import UdnaSDK`, as in the published demo -- a relative
+# import raises `ImportError: attempted relative import with no known
+# parent package` before anything else runs. Falling back to an absolute
+# import supports both packaging layouts.
+try:
+    from .udna import (
+        Did,
+        DidKeyMethod,
+        DidWebMethod,
+        UdnaAddress,
+        DidResolver,
+        KeyRotationManager,
+        PairwiseDidManager,
+        NoiseHandshake,
+        SecureMessaging,
+        AddressFlags as UdnaAddressFlags
+    )
+except ImportError:
+    from udna import (
+        Did,
+        DidKeyMethod,
+        DidWebMethod,
+        UdnaAddress,
+        DidResolver,
+        KeyRotationManager,
+        PairwiseDidManager,
+        NoiseHandshake,
+        SecureMessaging,
+        AddressFlags as UdnaAddressFlags
+    )
 
 
 # ============================================================================
 # Configuration and Constants
 # ============================================================================
 
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 
 class AddressFlags(Enum):
     """Standard UDNA address flags"""
@@ -63,7 +84,7 @@ class AddressFlags(Enum):
     EPHEMERAL = 4
     PRIORITY_HIGH = 8
     ENCRYPTED = 16
-    
+
     @classmethod
     def from_string(cls, flag_str: str) -> 'AddressFlags':
         mapping = {
@@ -90,7 +111,7 @@ class UdnaAddressInfo:
     flags: List[str]
     nonce: int
     created_at: str
-    
+
     @classmethod
     def from_udna_address(cls, addr: UdnaAddress) -> 'UdnaAddressInfo':
         flag_names = []
@@ -98,7 +119,7 @@ class UdnaAddressInfo:
         for flag in AddressFlags:
             if flags_value & flag.value:
                 flag_names.append(flag.name.lower())
-        
+
         return cls(
             address=base58.b58encode(addr.encode()).decode(),
             did=str(addr.did),
@@ -107,10 +128,10 @@ class UdnaAddressInfo:
             nonce=addr.nonce,
             created_at=datetime.now().isoformat()
         )
-    
+
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
-    
+
     def to_json(self, indent: int = 2) -> str:
         return json.dumps(self.to_dict(), indent=indent)
 
@@ -123,7 +144,7 @@ class DidInfo:
     identifier: str
     created_at: str
     private_key_pem: Optional[str] = None
-    
+
     @classmethod
     def from_did(cls, did: Did, private_key: ed25519.Ed25519PrivateKey = None) -> 'DidInfo':
         info = cls(
@@ -135,7 +156,7 @@ class DidInfo:
         if private_key:
             info.private_key_pem = cls._export_private_key(private_key)
         return info
-    
+
     @staticmethod
     def _export_private_key(private_key: ed25519.Ed25519PrivateKey) -> str:
         return private_key.private_bytes(
@@ -143,13 +164,13 @@ class DidInfo:
             format=serialization.PrivateFormat.PKCS8,
             encryption_algorithm=serialization.NoEncryption()
         ).decode('utf-8')
-    
+
     def to_dict(self) -> Dict[str, Any]:
         data = asdict(self)
         if data.get('private_key_pem'):
             data['private_key_pem'] = '[REDACTED]'  # Don't expose in JSON
         return data
-    
+
     def to_json(self, indent: int = 2) -> str:
         return json.dumps(self.to_dict(), indent=indent)
 
@@ -162,10 +183,10 @@ class VerificationResult:
     did: str
     verified_at: str
     error: Optional[str] = None
-    
+
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
-    
+
     def to_json(self, indent: int = 2) -> str:
         return json.dumps(self.to_dict(), indent=indent)
 
@@ -199,7 +220,7 @@ class SecureSession:
 class UdnaSDK:
     """
     Universal DID-Native Addressing SDK with full feature set.
-    
+
     Features:
     - DID creation (did:key, did:web)
     - UDNA address creation and verification
@@ -208,11 +229,11 @@ class UdnaSDK:
     - Secure messaging with Noise protocol
     - Export/import identities to/from files
     """
-    
+
     def __init__(self, cache_enabled: bool = True, storage_dir: Optional[str] = None):
         """
         Initialize the UDNA SDK.
-        
+
         Args:
             cache_enabled: Enable DID document caching
             storage_dir: Directory for storing keys and identities (optional)
@@ -225,29 +246,51 @@ class UdnaSDK:
         self._active_keys: Dict[str, ed25519.Ed25519PrivateKey] = {}
         self._active_sessions: Dict[str, Dict] = {}
         self._logger = logging.getLogger(__name__)
-        
+
         # Setup storage
         self.storage_dir = storage_dir
         if storage_dir:
             Path(storage_dir).mkdir(parents=True, exist_ok=True)
-    
+
+    # ========================================================================
+    # Async helper
+    # ========================================================================
+
+    @staticmethod
+    def _run_coro(coro):
+        """Run an async coroutine from sync code.
+
+        Uses asyncio.run() (which creates and cleanly tears down its own
+        event loop) for the common case. If we're already inside a running
+        event loop in this thread (e.g. the SDK is used from within an
+        async web framework), asyncio.run() would raise, so we fall back
+        to running the coroutine in a short-lived worker thread instead.
+        """
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.run(coro)
+        else:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                return pool.submit(asyncio.run, coro).result()
+
     # ========================================================================
     # DID Operations
     # ========================================================================
-    
+
     def create_did(self, method: str = "key", domain: str = None) -> DidInfo:
         """
         Create a new DID.
-        
+
         Args:
             method: DID method ("key" or "web")
             domain: Domain name for did:web (required if method="web")
-            
+
         Returns:
             DidInfo object containing the created DID
         """
         self._logger.info(f"Creating new DID with method: {method}")
-        
+
         if method == "key":
             did, private_key = DidKeyMethod.generate()
         elif method == "web":
@@ -257,37 +300,33 @@ class UdnaSDK:
             private_key = ed25519.Ed25519PrivateKey.generate()
         else:
             raise ValueError(f"Unsupported DID method: {method}")
-        
+
         did_str = str(did)
         self._active_keys[did_str] = private_key
         did_info = DidInfo.from_did(did, private_key)
-        
+
         # Save to storage if configured
         if self.storage_dir:
             self._save_identity(did_info, private_key)
-        
+
         self._logger.info(f"DID created: {did_str[:40]}...")
         return did_info
-    
+
     def resolve_did(self, did: str) -> Dict[str, Any]:
         """
         Resolve a DID to get its document.
-        
+
         Args:
             did: DID string to resolve
-            
+
         Returns:
             Dictionary with DID document information
         """
         self._logger.info(f"Resolving DID: {did[:40]}...")
         did_obj = Did.parse(did)
-        
-        import asyncio
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        document = loop.run_until_complete(self.resolver.resolve(did_obj))
-        loop.close()
-        
+
+        document = self._run_coro(self.resolver.resolve(did_obj))
+
         return {
             "did": str(did_obj),
             "verification_methods": [
@@ -300,12 +339,12 @@ class UdnaSDK:
             "created": document.created,
             "updated": document.updated
         }
-    
+
     # ========================================================================
     # Address Operations
     # ========================================================================
-    
-    def create_address(self, 
+
+    def create_address(self,
                        did: str,
                        facet_id: int = 0x02,
                        flags: List[str] = None) -> UdnaAddressInfo:
@@ -313,55 +352,55 @@ class UdnaSDK:
         Create a UDNA address for the given DID.
         """
         self._logger.info(f"Creating UDNA address for DID: {did[:40]}...")
-        
+
         if did not in self._active_keys:
             raise ValueError(f"No private key found for DID: {did}. Use load_identity() first.")
-        
+
         private_key = self._active_keys[did]
         did_obj = Did.parse(did)
-        
+
         flags_value = 0
         if flags:
             for flag_str in flags:
                 flag = AddressFlags.from_string(flag_str)
                 flags_value |= flag.value
-        
+
         address = UdnaAddress(
             did=did_obj,
             facet_id=facet_id,
             nonce=secrets.randbits(64),
             flags=flags_value
         )
-        
+
         address_bytes = address.encode()
         signature = private_key.sign(address_bytes)
         address.signature = signature
-        
+
         address_info = UdnaAddressInfo.from_udna_address(address)
         self._logger.info(f"Address created: {address_info.address[:40]}...")
         return address_info
-    
+
     def verify_address(self, address: str) -> VerificationResult:
         """
         Verify a UDNA address cryptographically.
         """
         self._logger.info("Verifying UDNA address")
-        
+
         try:
             address_bytes = base58.b58decode(address)
             addr_obj = UdnaAddress.decode(address_bytes)
-            
+
             did_doc = DidKeyMethod.resolve(addr_obj.did)
             public_key_multibase = did_doc.verification_method[0].public_key_multibase
             multicodec_key = base58.b58decode(public_key_multibase[1:])
-            
+
             if len(multicodec_key) >= 2 and multicodec_key[:2] == b'\xed\x01':
                 raw_public_key = multicodec_key[2:]
             else:
                 raw_public_key = multicodec_key
-            
+
             public_key = ed25519.Ed25519PublicKey.from_public_bytes(raw_public_key)
-            
+
             addr_without_sig = UdnaAddress(
                 version=addr_obj.version,
                 did_type=addr_obj.did_type,
@@ -375,7 +414,7 @@ class UdnaSDK:
             )
             message = addr_without_sig.encode()
             public_key.verify(addr_obj.signature, message)
-            
+
             return VerificationResult(
                 is_valid=True,
                 address=address,
@@ -383,6 +422,7 @@ class UdnaSDK:
                 verified_at=datetime.now().isoformat()
             )
         except Exception as e:
+            self._logger.warning(f"Address verification failed: {e}")
             return VerificationResult(
                 is_valid=False,
                 address=address,
@@ -390,44 +430,44 @@ class UdnaSDK:
                 verified_at=datetime.now().isoformat(),
                 error=str(e)
             )
-    
+
     # ========================================================================
     # Key Management
     # ========================================================================
-    
+
     def rotate_keys(self, did: str, reason: str = "regular_rotation") -> KeyRotationResult:
         """
         Rotate keys for a DID.
-        
+
         Args:
             did: DID to rotate keys for
             reason: Rotation reason ("regular_rotation", "compromised", "expired")
-            
+
         Returns:
             KeyRotationResult with rotation details
         """
         self._logger.info(f"Rotating keys for DID: {did[:40]}...")
-        
+
         try:
             if did not in self._active_keys:
                 raise ValueError(f"No active key for DID: {did}")
-            
+
             old_key = self._active_keys[did]
             new_key = ed25519.Ed25519PrivateKey.generate()
-            
+
             reason_map = {"regular_rotation": 1, "compromised": 2, "expired": 3}
             reason_code = reason_map.get(reason, 1)
-            
+
             did_obj = Did.parse(did)
             proof = self.rotation_manager.rotate_key(did_obj, old_key, new_key, reason_code)
-            
+
             self._active_keys[did] = new_key
-            
+
             # Save updated identity
             if self.storage_dir:
                 did_info = DidInfo.from_did(did_obj, new_key)
                 self._save_identity(did_info, new_key)
-            
+
             return KeyRotationResult(
                 success=True,
                 did=did,
@@ -445,26 +485,26 @@ class UdnaSDK:
                 rotated_at=datetime.now().isoformat(),
                 error=str(e)
             )
-    
+
     def export_identity(self, did: str, filepath: str, format: str = "json") -> bool:
         """
         Export identity (DID and private key) to a file.
-        
+
         Args:
             did: DID to export
             filepath: Path to save the identity
             format: Export format ("json" or "pem")
-            
+
         Returns:
             True if successful, False otherwise
         """
         if did not in self._active_keys:
             self._logger.error(f"DID not found: {did}")
             return False
-        
+
         private_key = self._active_keys[did]
         did_obj = Did.parse(did)
-        
+
         if format == "json":
             identity = {
                 "did": did,
@@ -490,47 +530,47 @@ class UdnaSDK:
                 f.write(pem_data)
         else:
             raise ValueError(f"Unsupported format: {format}")
-        
+
         self._logger.info(f"Identity exported to: {filepath}")
         return True
-    
+
     def import_identity(self, filepath: str) -> Optional[DidInfo]:
         """
         Import identity from a file.
-        
+
         Args:
             filepath: Path to the identity file
-            
+
         Returns:
             DidInfo if successful, None otherwise
         """
         with open(filepath, 'r') as f:
             data = json.load(f)
-        
+
         did = Did.parse(data['did'])
         pem_data = data['private_key_pem'].encode('utf-8')
         private_key = serialization.load_pem_private_key(pem_data, password=None)
-        
+
         self._active_keys[str(did)] = private_key
         did_info = DidInfo.from_did(did, private_key)
-        
+
         self._logger.info(f"Identity imported: {did_info.did[:40]}...")
         return did_info
-    
+
     def load_identity(self, did: str, private_key_pem: str) -> bool:
         """
         Load an identity from PEM string.
-        
+
         Args:
             did: DID string
             private_key_pem: PEM-encoded private key
-            
+
         Returns:
             True if successful
         """
         try:
             private_key = serialization.load_pem_private_key(
-                private_key_pem.encode('utf-8'), 
+                private_key_pem.encode('utf-8'),
                 password=None
             )
             self._active_keys[did] = private_key
@@ -539,137 +579,200 @@ class UdnaSDK:
         except Exception as e:
             self._logger.error(f"Failed to load identity: {e}")
             return False
-    
+
+    def _load_from_storage(self, did: str) -> bool:
+        """Load a previously stored identity by DID string, if present in
+        self.storage_dir. Returns True if a key was loaded."""
+        if not self.storage_dir:
+            return False
+        filepath = Path(self.storage_dir) / f"{did.replace(':', '_')}.json"
+        if not filepath.exists():
+            return False
+        return self.import_identity(str(filepath)) is not None
+
     # ========================================================================
     # Pairwise DIDs
     # ========================================================================
-    
+
     def create_pairwise_did(self, my_did: str, peer_did: str) -> DidInfo:
         """
         Create a pairwise DID for a specific relationship.
-        
+
         Args:
             my_did: Your DID
             peer_did: Peer's DID
-            
+
         Returns:
             DidInfo for the pairwise DID
         """
         self._logger.info(f"Creating pairwise DID for relationship")
-        
+
         my_did_obj = Did.parse(my_did)
         peer_did_obj = Did.parse(peer_did)
-        
+
         pairwise_did, private_key = self.pairwise_manager.generate_pairwise_did(
             my_did_obj, peer_did_obj
         )
-        
+
         did_str = str(pairwise_did)
         self._active_keys[did_str] = private_key
-        
+
         return DidInfo.from_did(pairwise_did, private_key)
-    
+
     # ========================================================================
     # Secure Messaging
     # ========================================================================
-    
-    def initiate_secure_session(self, my_did: str, remote_did: str) -> SecureSession:
+
+    def initiate_secure_session(self, my_did: str, remote_did: str) -> Tuple[SecureSession, bytes]:
         """
-        Initiate a secure Noise protocol session.
-        
-        Args:
-            my_did: Your DID
-            remote_did: Remote party's DID
-            
+        Initiate a secure Noise-style session as the initiator.
+
         Returns:
-            SecureSession information
+            A tuple of (SecureSession, handshake_init_message). Send the
+            handshake_init_message to the remote peer, have them call
+            respond_to_session(), then pass their response into
+            complete_secure_session() to finish establishing the session.
         """
         if my_did not in self._active_keys:
             raise ValueError(f"No private key for DID: {my_did}")
-        
+
         private_key = self._active_keys[my_did]
         my_did_obj = Did.parse(my_did)
         remote_did_obj = Did.parse(remote_did)
-        
-        session_id, message = self.handshake_handler.initiate_handshake(
+
+        session_id, init_message = self.handshake_handler.initiate_handshake(
             my_did_obj, private_key, remote_did_obj
         )
-        
+
         self._active_sessions[session_id] = {
+            'local_did': my_did,
             'remote_did': remote_did,
-            'state': 'initiated',
-            'message': message
+            'state': 'initiated'
         }
-        
-        return SecureSession(
+
+        session = SecureSession(
             session_id=session_id,
             local_did=my_did,
             remote_did=remote_did,
             established_at=datetime.now().isoformat(),
             session_key_hash="pending"
         )
-    
-    def respond_to_session(self, session_id: str, init_message: bytes) -> SecureSession:
+        return session, init_message
+
+    def respond_to_session(self, my_did: str, init_message: bytes) -> Tuple[SecureSession, bytes]:
         """
-        Respond to a session initiation.
-        
+        Respond to a handshake initiated by a remote peer.
+
         Args:
-            session_id: Session ID
-            init_message: Initiation message from peer
-            
+            my_did: Your DID (must already have a loaded private key)
+            init_message: The handshake_init message bytes received from the peer
+
         Returns:
-            SecureSession information
+            A tuple of (SecureSession, handshake_response_message). The
+            session is already established on this side (the responder has
+            both ephemeral keys as soon as it processes the init message);
+            send handshake_response_message back to the initiator so they
+            can call complete_secure_session().
         """
-        # Implementation would complete handshake
-        pass
-    
+        if my_did not in self._active_keys:
+            raise ValueError(f"No private key for DID: {my_did}")
+
+        private_key = self._active_keys[my_did]
+        my_did_obj = Did.parse(my_did)
+
+        session_id, response_message = self.handshake_handler.respond_to_handshake(
+            my_did_obj, private_key, init_message
+        )
+
+        handshake_session = self.handshake_handler.sessions[session_id]
+        session_key = handshake_session['session_key']
+        remote_did = str(handshake_session['remote_did'])
+
+        self._active_sessions[session_id] = {
+            'local_did': my_did,
+            'remote_did': remote_did,
+            'state': 'established',
+            'session_key': session_key
+        }
+
+        session = SecureSession(
+            session_id=session_id,
+            local_did=my_did,
+            remote_did=remote_did,
+            established_at=datetime.now().isoformat(),
+            session_key_hash=hashlib.sha256(session_key).hexdigest()[:16]
+        )
+        return session, response_message
+
+    def complete_secure_session(self, session_id: str, response_message: bytes) -> SecureSession:
+        """
+        Complete a session as the initiator, after receiving the peer's
+        handshake response (from their respond_to_session() call).
+        """
+        if session_id not in self._active_sessions:
+            raise ValueError(f"Unknown session: {session_id}")
+
+        session_key = self.handshake_handler.finalize_handshake(session_id, response_message)
+
+        self._active_sessions[session_id]['session_key'] = session_key
+        self._active_sessions[session_id]['state'] = 'established'
+
+        entry = self._active_sessions[session_id]
+        return SecureSession(
+            session_id=session_id,
+            local_did=entry['local_did'],
+            remote_did=entry['remote_did'],
+            established_at=datetime.now().isoformat(),
+            session_key_hash=hashlib.sha256(session_key).hexdigest()[:16]
+        )
+
     def encrypt_message(self, session_id: str, plaintext: str) -> bytes:
         """
         Encrypt a message using the session key.
-        
+
         Args:
-            session_id: Active session ID
+            session_id: Active (established) session ID
             plaintext: Message to encrypt
-            
+
         Returns:
             Encrypted message bytes
         """
         session = self._active_sessions.get(session_id)
         if not session or 'session_key' not in session:
-            raise ValueError("No active session found")
-        
+            raise ValueError("No established session found for this session_id")
+
         return self.messaging.encrypt_message(
-            session['session_key'], 
+            session['session_key'],
             plaintext.encode('utf-8')
         )
-    
+
     def decrypt_message(self, session_id: str, ciphertext: bytes) -> str:
         """
         Decrypt a message using the session key.
-        
+
         Args:
-            session_id: Active session ID
+            session_id: Active (established) session ID
             ciphertext: Encrypted message bytes
-            
+
         Returns:
             Decrypted message string
         """
         session = self._active_sessions.get(session_id)
         if not session or 'session_key' not in session:
-            raise ValueError("No active session found")
-        
+            raise ValueError("No established session found for this session_id")
+
         decrypted = self.messaging.decrypt_message(session['session_key'], ciphertext)
         return decrypted.decode('utf-8')
-    
+
     # ========================================================================
     # Storage Operations
     # ========================================================================
-    
+
     def _save_identity(self, did_info: DidInfo, private_key: ed25519.Ed25519PrivateKey):
         """Save identity to storage directory."""
         if not self.storage_dir:
             return
-        
+
         filepath = Path(self.storage_dir) / f"{did_info.did.replace(':', '_')}.json"
         identity = {
             "did": did_info.did,
@@ -684,23 +787,23 @@ class UdnaSDK:
         }
         with open(filepath, 'w') as f:
             json.dump(identity, f, indent=2)
-    
+
     def list_identities(self) -> List[str]:
         """List all DIDs in storage."""
         if not self.storage_dir:
             return []
-        
+
         identities = []
         for file in Path(self.storage_dir).glob("*.json"):
             with open(file, 'r') as f:
                 data = json.load(f)
                 identities.append(data.get('did', file.stem))
         return identities
-    
+
     # ========================================================================
     # Utility Methods
     # ========================================================================
-    
+
     def get_did_info(self, did: str) -> Optional[Dict[str, Any]]:
         """Get information about a DID managed by this SDK instance."""
         if did in self._active_keys:
@@ -710,7 +813,7 @@ class UdnaSDK:
                 "method": Did.parse(did).method
             }
         return None
-    
+
     def list_active_dids(self) -> List[str]:
         """List all DIDs with active keys in memory."""
         return list(self._active_keys.keys())
@@ -727,10 +830,10 @@ def setup_logging(verbose: bool = False):
 
 def cmd_create(args) -> int:
     sdk = UdnaSDK(storage_dir=args.storage)
-    
+
     print("Creating DID...", file=sys.stderr)
     did_info = sdk.create_did(method=args.method, domain=args.domain)
-    
+
     flags = args.flags if args.flags else []
     print("Creating UDNA address...", file=sys.stderr)
     address_info = sdk.create_address(
@@ -738,11 +841,11 @@ def cmd_create(args) -> int:
         facet_id=args.facet,
         flags=flags
     )
-    
+
     if args.export:
         sdk.export_identity(did_info.did, args.export)
         print(f"Identity exported to: {args.export}", file=sys.stderr)
-    
+
     if args.format == 'json':
         result = {"did": did_info.to_dict(), "address": address_info.to_dict()}
         print(json.dumps(result, indent=2))
@@ -758,24 +861,24 @@ def cmd_create(args) -> int:
         print(f"  Nonce: {address_info.nonce}")
         print(f"\nCreated: {address_info.created_at}")
         print("=" * 70)
-    
+
     if args.output:
         with open(args.output, 'w') as f:
             json.dump({"did": did_info.did, "address": address_info.address}, f)
         print(f"\nSaved to: {args.output}", file=sys.stderr)
-    
+
     return 0
 
 
 def cmd_rotate(args) -> int:
     sdk = UdnaSDK(storage_dir=args.storage)
-    
+
     # Load identity if needed
     if args.identity_file:
         sdk.import_identity(args.identity_file)
-    
+
     result = sdk.rotate_keys(args.did, reason=args.reason)
-    
+
     if result.success:
         print("\n" + "=" * 70)
         print("KEY ROTATION SUCCESSFUL")
@@ -792,24 +895,30 @@ def cmd_rotate(args) -> int:
 
 
 def cmd_export(args) -> int:
-    sdk = UdnaSDK()
-    
-    # Need to have the key loaded
-    print("Note: This requires the DID to be created in this session", file=sys.stderr)
-    print("Use --did and ensure the identity is in memory", file=sys.stderr)
-    
+    sdk = UdnaSDK(storage_dir=args.storage)
+
+    # An identity has to actually be loaded before it can be exported.
+    # Previously this command always failed because nothing populated
+    # sdk._active_keys.
+    if args.identity_file:
+        sdk.import_identity(args.identity_file)
+    elif args.storage:
+        sdk._load_from_storage(args.did)
+
     if sdk.export_identity(args.did, args.output, format=args.format):
         print(f"Identity exported to: {args.output}")
         return 0
     else:
         print(f"Failed to export identity for DID: {args.did}", file=sys.stderr)
+        print("Provide --identity-file <path> or --storage <dir> containing the identity.",
+              file=sys.stderr)
         return 1
 
 
 def cmd_list(args) -> int:
     sdk = UdnaSDK(storage_dir=args.storage)
     identities = sdk.list_identities()
-    
+
     print("\n" + "=" * 70)
     print("STORED IDENTITIES")
     print("=" * 70)
@@ -821,20 +930,20 @@ def cmd_list(args) -> int:
 
 def cmd_verify(args) -> int:
     sdk = UdnaSDK()
-    
+
     if args.file:
         with open(args.file, 'r') as f:
             data = json.load(f)
             address = data.get('address', {}).get('address') or data.get('address')
     else:
         address = args.address
-    
+
     if not address:
         print("Error: No address provided", file=sys.stderr)
         return 1
-    
+
     result = sdk.verify_address(address)
-    
+
     if args.format == 'json':
         print(result.to_json())
     else:
@@ -847,7 +956,7 @@ def cmd_verify(args) -> int:
         if result.error:
             print(f"Error: {result.error}")
         print("=" * 70)
-    
+
     return 0 if result.is_valid else 1
 
 
@@ -858,9 +967,9 @@ def main():
     )
     parser.add_argument('--version', action='version', version=f'UDNA SDK v{VERSION}')
     parser.add_argument('-v', '--verbose', action='store_true', help='Enable verbose output')
-    
+
     subparsers = parser.add_subparsers(dest='command', help='Commands')
-    
+
     # Create command
     create_parser = subparsers.add_parser('create', help='Create a new DID and UDNA address')
     create_parser.add_argument('-m', '--method', choices=['key', 'web'], default='key',
@@ -868,7 +977,7 @@ def main():
     create_parser.add_argument('-d', '--domain', help='Domain for did:web method')
     create_parser.add_argument('-f', '--facet', type=int, default=0x02,
                                help='Facet ID (default: 0x02 for messaging)')
-    create_parser.add_argument('--flags', nargs='*', 
+    create_parser.add_argument('--flags', nargs='*',
                                choices=['default', 'messaging', 'routing', 'ephemeral', 'priority', 'encrypted'],
                                help='Address flags')
     create_parser.add_argument('-o', '--output', help='Save address to file')
@@ -876,7 +985,7 @@ def main():
     create_parser.add_argument('-s', '--storage', help='Storage directory for identities')
     create_parser.add_argument('--format', choices=['text', 'json'], default='text',
                                help='Output format')
-    
+
     # Rotate command
     rotate_parser = subparsers.add_parser('rotate', help='Rotate keys for a DID')
     rotate_parser.add_argument('did', help='DID to rotate keys for')
@@ -884,18 +993,22 @@ def main():
                                default='regular_rotation', help='Rotation reason')
     rotate_parser.add_argument('-i', '--identity-file', help='Identity JSON file to load')
     rotate_parser.add_argument('-s', '--storage', help='Storage directory for identities')
-    
+
     # Export command
     export_parser = subparsers.add_parser('export', help='Export identity to file')
     export_parser.add_argument('did', help='DID to export')
     export_parser.add_argument('-o', '--output', required=True, help='Output file path')
     export_parser.add_argument('--format', choices=['json', 'pem'], default='json',
                                help='Export format')
-    
+    export_parser.add_argument('-i', '--identity-file',
+                               help='Load identity from this JSON file before exporting')
+    export_parser.add_argument('-s', '--storage',
+                               help='Storage directory to load the identity from')
+
     # List command
     list_parser = subparsers.add_parser('list', help='List stored identities')
     list_parser.add_argument('-s', '--storage', help='Storage directory')
-    
+
     # Verify command
     verify_parser = subparsers.add_parser('verify', help='Verify a UDNA address')
     verify_group = verify_parser.add_mutually_exclusive_group(required=True)
@@ -903,10 +1016,10 @@ def main():
     verify_group.add_argument('-f', '--file', help='JSON file containing address')
     verify_parser.add_argument('--format', choices=['text', 'json'], default='text',
                                help='Output format')
-    
+
     args = parser.parse_args()
     setup_logging(args.verbose)
-    
+
     if args.command == 'create':
         return cmd_create(args)
     elif args.command == 'rotate':

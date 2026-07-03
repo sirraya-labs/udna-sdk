@@ -5,6 +5,8 @@ Based on the UDNA whitepaper v1.0 by Amir Hameed Mir
 
 This is a comprehensive implementation demonstrating the core concepts
 of identity-native networking using Decentralized Identifiers (DIDs).
+
+
 """
 
 import hashlib
@@ -17,15 +19,14 @@ from enum import Enum
 from typing import Dict, List, Optional, Tuple, Union
 from dataclasses import dataclass, asdict
 from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import ed25519
+from cryptography.hazmat.primitives.asymmetric import ed25519, x25519
 from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 import hmac
 
 # ============================================================================
 # Core Data Structures
 # ============================================================================
-
-# Add this after the imports section (around line 20)
 
 class AddressFlags(Enum):
     """Standard UDNA address flags"""
@@ -35,7 +36,7 @@ class AddressFlags(Enum):
     EPHEMERAL = 4
     PRIORITY_HIGH = 8
     ENCRYPTED = 16
-    
+
     @classmethod
     def from_string(cls, flag_str: str) -> 'AddressFlags':
         """Convert string to flag enum"""
@@ -54,10 +55,10 @@ class Did:
     """Decentralized Identifier representation"""
     method: str
     identifier: str
-    
+
     def __str__(self) -> str:
         return f"did:{self.method}:{self.identifier}"
-    
+
     @classmethod
     def parse(cls, did_string: str) -> 'Did':
         """Parse DID string into components"""
@@ -65,7 +66,7 @@ class Did:
         if len(parts) < 3 or parts[0] != 'did':
             raise ValueError(f"Invalid DID format: {did_string}")
         return cls(method=parts[1], identifier=':'.join(parts[2:]))
-    
+
     def fingerprint(self) -> bytes:
         """Generate SHA-256 fingerprint for DHT routing"""
         return hashlib.sha256(str(self).encode()).digest()
@@ -94,13 +95,23 @@ class DidDocument:
     service: List[ServiceEndpoint]
     created: str
     updated: str
-    
+
     def get_public_key(self, key_id: str) -> Optional[bytes]:
-        """Extract public key bytes from verification method"""
+        """Extract raw public key bytes from verification method.
+
+        Fix: public_key_multibase is 'z' + base58btc(multicodec_prefix + raw_key).
+        The previous version only stripped the 'z' multibase prefix and
+        returned the multicodec-prefixed bytes, which is not a valid raw
+        Ed25519 key (this broke signature verification anywhere this
+        method's result was fed directly into
+        Ed25519PublicKey.from_public_bytes()).
+        """
         for vm in self.verification_method:
             if vm.id == key_id:
-                # Decode multibase (assuming base58btc encoding)
-                return base58.b58decode(vm.public_key_multibase[1:])  # Skip 'z' prefix
+                decoded = base58.b58decode(vm.public_key_multibase[1:])  # Skip 'z' prefix
+                if len(decoded) >= 2 and decoded[:2] == b'\xed\x01':
+                    return decoded[2:]  # Strip Ed25519 multicodec prefix
+                return decoded
         return None
 
 @dataclass
@@ -115,11 +126,11 @@ class UdnaAddress:
     flags: int = 0  # Privacy/rotation flags
     nonce: int = 0  # 64-bit random value
     signature: bytes = b''  # Digital signature
-    
+
     def encode(self) -> bytes:
         """Encode address to binary format"""
         did_bytes = str(self.did).encode('utf-8')
-        
+
         # Pack header fields
         header = struct.pack(
             '!BBHB',  # Ver, DIDType, DIDLen, FacetId
@@ -128,61 +139,61 @@ class UdnaAddress:
             len(did_bytes),
             self.facet_id
         )
-        
+
         header += did_bytes
-        
+
         # Key hint
         header += struct.pack('!B', len(self.key_hint))
         header += self.key_hint
-        
+
         # Route hint
         header += struct.pack('!B', len(self.route_hint))
         header += self.route_hint
-        
+
         # Flags and nonce
         header += struct.pack('!HQ', self.flags, self.nonce)
-        
+
         # Signature
         header += struct.pack('!H', len(self.signature))
         header += self.signature
-        
+
         return header
-    
+
     @classmethod
     def decode(cls, data: bytes) -> 'UdnaAddress':
         """Decode binary format to address"""
         offset = 0
-        
+
         # Unpack basic header
         ver, did_type, did_len, facet_id = struct.unpack_from('!BBHB', data, offset)
         offset += 5
-        
+
         # Extract DID
         did_bytes = data[offset:offset + did_len]
         did = Did.parse(did_bytes.decode('utf-8'))
         offset += did_len
-        
+
         # Key hint
         key_hint_len = struct.unpack_from('!B', data, offset)[0]
         offset += 1
         key_hint = data[offset:offset + key_hint_len]
         offset += key_hint_len
-        
+
         # Route hint
         route_hint_len = struct.unpack_from('!B', data, offset)[0]
         offset += 1
         route_hint = data[offset:offset + route_hint_len]
         offset += route_hint_len
-        
+
         # Flags and nonce
         flags, nonce = struct.unpack_from('!HQ', data, offset)
         offset += 10
-        
+
         # Signature
         sig_len = struct.unpack_from('!H', data, offset)[0]
         offset += 2
         signature = data[offset:offset + sig_len]
-        
+
         return cls(
             version=ver,
             did_type=did_type,
@@ -201,45 +212,45 @@ class UdnaAddress:
 
 class DidKeyMethod:
     """Implementation of did:key method"""
-    
+
     @staticmethod
     def generate() -> Tuple[Did, ed25519.Ed25519PrivateKey]:
         """Generate new did:key identity"""
         private_key = ed25519.Ed25519PrivateKey.generate()
         public_key = private_key.public_key()
-        
+
         # Encode public key as multicodec
         public_key_bytes = public_key.public_bytes(
             encoding=serialization.Encoding.Raw,
             format=serialization.PublicFormat.Raw
         )
-        
+
         # Ed25519 public key multicodec prefix (0xed01)
         multicodec_key = b'\xed\x01' + public_key_bytes
         identifier = base58.b58encode(multicodec_key).decode('ascii')
-        
+
         did = Did(method='key', identifier=f'z{identifier}')
         return did, private_key
-    
+
     @staticmethod
     def resolve(did: Did) -> DidDocument:
         """Resolve did:key to DID Document (algorithmic)"""
         if did.method != 'key':
             raise ValueError("Invalid DID method for did:key resolver")
-        
+
         # Extract public key from identifier
         identifier = did.identifier[1:]  # Remove 'z' prefix
         multicodec_key = base58.b58decode(identifier)
-        
+
         if multicodec_key[:2] != b'\xed\x01':
             raise ValueError("Unsupported key type")
-        
+
         public_key_bytes = multicodec_key[2:]
         public_key_multibase = f'z{base58.b58encode(multicodec_key).decode("ascii")}'
-        
+
         # Create DID Document
         key_id = f"{did}#z{identifier}"
-        
+
         return DidDocument(
             id=str(did),
             verification_method=[
@@ -258,7 +269,7 @@ class DidKeyMethod:
 
 class DidWebMethod:
     """Implementation of did:web method"""
-    
+
     @staticmethod
     def create(domain: str, path: str = '') -> Did:
         """Create did:web identifier"""
@@ -267,13 +278,13 @@ class DidWebMethod:
         else:
             identifier = domain
         return Did(method='web', identifier=identifier)
-    
-    @staticmethod  
+
+    @staticmethod
     def resolve(did: Did) -> DidDocument:
         """Resolve did:web via HTTPS (simplified)"""
         if did.method != 'web':
             raise ValueError("Invalid DID method for did:web resolver")
-        
+
         # In a real implementation, this would make HTTPS requests
         # For demo, return a mock document
         return DidDocument(
@@ -304,16 +315,16 @@ class DidWebMethod:
 
 class DidCache:
     """Local DID Document cache with TTL management"""
-    
+
     def __init__(self, default_ttl: int = 3600):
         self.cache: Dict[str, Tuple[DidDocument, float]] = {}
         self.default_ttl = default_ttl
-    
+
     def put(self, did: Did, document: DidDocument, ttl: Optional[int] = None):
         """Cache DID document with TTL"""
         expiry = time.time() + (ttl or self.default_ttl)
         self.cache[str(did)] = (document, expiry)
-    
+
     def get(self, did: Did) -> Optional[DidDocument]:
         """Retrieve cached DID document"""
         entry = self.cache.get(str(did))
@@ -324,7 +335,7 @@ class DidCache:
             else:
                 del self.cache[str(did)]
         return None
-    
+
     def cleanup(self):
         """Remove expired entries"""
         now = time.time()
@@ -334,28 +345,28 @@ class DidCache:
 
 class DidResolver:
     """Multi-tier DID resolution system"""
-    
+
     def __init__(self):
         self.cache = DidCache()
         self.resolvers = {
             'key': DidKeyMethod.resolve,
             'web': DidWebMethod.resolve
         }
-    
+
     async def resolve(self, did: Did) -> DidDocument:
         """Resolve DID with caching"""
         # Tier 1: Check local cache
         cached = self.cache.get(did)
         if cached:
             return cached
-        
+
         # Tier 2: Method-specific resolution
         if did.method not in self.resolvers:
             raise ValueError(f"Unsupported DID method: {did.method}")
-        
+
         document = self.resolvers[did.method](did)
         self.cache.put(did, document)
-        
+
         return document
 
 # ============================================================================
@@ -372,7 +383,7 @@ class RotationProof:
     valid_to: int
     reason: int
     sig_by_prev: bytes
-    
+
     def verify(self, prev_public_key: ed25519.Ed25519PublicKey) -> bool:
         """Verify rotation proof signature"""
         try:
@@ -383,26 +394,26 @@ class RotationProof:
                 self.new_doc_hash +
                 struct.pack('!QQB', self.valid_from, self.valid_to, self.reason)
             )
-            
+
             prev_public_key.verify(self.sig_by_prev, message)
             return True
-        except:
+        except Exception:
             return False
 
 class KeyRotationManager:
     """Manages cryptographic key rotation"""
-    
+
     def __init__(self):
         self.rotation_proofs: Dict[str, List[RotationProof]] = {}
-    
-    def rotate_key(self, did: Did, old_private_key: ed25519.Ed25519PrivateKey, 
-                   new_private_key: ed25519.Ed25519PrivateKey, 
+
+    def rotate_key(self, did: Did, old_private_key: ed25519.Ed25519PrivateKey,
+                   new_private_key: ed25519.Ed25519PrivateKey,
                    reason: int = 1) -> RotationProof:
         """Create rotation proof for key transition"""
-        
+
         old_public = old_private_key.public_key()
         new_public = new_private_key.public_key()
-        
+
         old_key_bytes = old_public.public_bytes(
             encoding=serialization.Encoding.Raw,
             format=serialization.PublicFormat.Raw
@@ -411,14 +422,14 @@ class KeyRotationManager:
             encoding=serialization.Encoding.Raw,
             format=serialization.PublicFormat.Raw
         )
-        
+
         # Create new document hash (simplified)
         new_doc_hash = hashlib.sha256(f"{did}:{new_key_bytes.hex()}".encode()).digest()
-        
+
         now = int(time.time())
         valid_from = now
         valid_to = now + (365 * 24 * 3600)  # 1 year
-        
+
         # Sign rotation proof
         message = (
             old_key_bytes +
@@ -426,9 +437,9 @@ class KeyRotationManager:
             new_doc_hash +
             struct.pack('!QQB', valid_from, valid_to, reason)
         )
-        
+
         signature = old_private_key.sign(message)
-        
+
         proof = RotationProof(
             prev_key=old_key_bytes,
             new_key=new_key_bytes,
@@ -438,12 +449,12 @@ class KeyRotationManager:
             reason=reason,
             sig_by_prev=signature
         )
-        
+
         # Store proof
         if str(did) not in self.rotation_proofs:
             self.rotation_proofs[str(did)] = []
         self.rotation_proofs[str(did)].append(proof)
-        
+
         return proof
 
 # ============================================================================
@@ -452,70 +463,119 @@ class KeyRotationManager:
 
 class PairwiseDidManager:
     """Manages pairwise DIDs for privacy"""
-    
+
     def __init__(self):
         self.pairwise_seeds: Dict[Tuple[str, str], bytes] = {}
-    
+
     def generate_pairwise_did(self, my_did: Did, peer_did: Did) -> Tuple[Did, ed25519.Ed25519PrivateKey]:
         """Generate pairwise DID for relationship"""
         # Create deterministic seed for this relationship
         relationship_key = tuple(sorted([str(my_did), str(peer_did)]))
-        
+
         if relationship_key not in self.pairwise_seeds:
             # Generate shared secret (in real implementation, use key exchange)
             seed = secrets.token_bytes(32)
             self.pairwise_seeds[relationship_key] = seed
         else:
             seed = self.pairwise_seeds[relationship_key]
-        
+
         # Derive keypair from seed and relationship context
         context = f"{my_did}->{peer_did}".encode()
         derived_seed = hmac.digest(seed, context, hashlib.sha256)
-        
+
         # Generate private key from derived seed (simplified)
         private_key_bytes = hmac.digest(derived_seed, b"private_key", hashlib.sha256)
         private_key = ed25519.Ed25519PrivateKey.from_private_bytes(private_key_bytes)
-        
+
         # Create pairwise did:key
         public_key = private_key.public_key()
         public_key_bytes = public_key.public_bytes(
             encoding=serialization.Encoding.Raw,
             format=serialization.PublicFormat.Raw
         )
-        
+
         multicodec_key = b'\xed\x01' + public_key_bytes
         identifier = base58.b58encode(multicodec_key).decode('ascii')
         pairwise_did = Did(method='key', identifier=f'z{identifier}')
-        
+
         return pairwise_did, private_key
 
 # ============================================================================
-# Noise Protocol Integration
+# Noise-style Protocol Integration
 # ============================================================================
 
 class NoiseHandshake:
-    """Simplified Noise protocol handshake with DID authentication"""
-    
+    """DID-authenticated ephemeral X25519 handshake with Ed25519 signatures.
+
+    This is a simplified two-message handshake inspired by Noise-IK, not a
+    full Noise Protocol Framework implementation. It provides:
+      - Forward secrecy via fresh X25519 ephemeral keys per session
+      - Authentication via Ed25519 signatures over the ephemeral key
+        material, session id, recipient DID, and timestamp
+      - A session key derived via HKDF-SHA256 over a real X25519 shared
+        secret, so it cannot be computed by an observer of the handshake
+        messages alone (unlike the previous version of this class, which
+        derived the "session key" from public data only)
+
+    It does NOT provide full Noise guarantees such as identity hiding or
+    KCI resistance beyond signature binding. For production deployments,
+    prefer a vetted Noise implementation (e.g. the `noiseprotocol` library)
+    over this simplified version, or have this reviewed by a cryptographer
+    before shipping.
+    """
+
+    HANDSHAKE_TTL_SECONDS = 120  # reject handshake messages outside this window
+
     def __init__(self):
         self.sessions: Dict[str, Dict] = {}
-    
-    def initiate_handshake(self, local_did: Did, local_private_key: ed25519.Ed25519PrivateKey,
-                          remote_did: Did) -> Tuple[str, bytes]:
-        """Initiate Noise handshake with DID identity"""
-        session_id = secrets.token_hex(16)
-        
-        # Generate ephemeral key for handshake
-        ephemeral_key = ed25519.Ed25519PrivateKey.generate()
-        
-        # Create handshake message (simplified Noise-IK pattern)
-        ephemeral_public = ephemeral_key.public_key().public_bytes(
+
+    @staticmethod
+    def _raw(key) -> bytes:
+        return key.public_bytes(
             encoding=serialization.Encoding.Raw,
             format=serialization.PublicFormat.Raw
         )
-        
-        # Sign ephemeral key with DID key
-        signature = local_private_key.sign(ephemeral_public + str(remote_did).encode())
-        
+
+    @staticmethod
+    def _session_key(shared_secret: bytes, did_a: Did, did_b: Did,
+                      eph_a: bytes, eph_b: bytes) -> bytes:
+        """Derive a session key that both parties compute identically,
+        regardless of which side is 'local' vs 'remote' in their own
+        bookkeeping."""
+        dids_sorted = sorted([str(did_a), str(did_b)])
+        ephs_sorted = sorted([eph_a, eph_b])
+        info = (
+            b'udna-noise-session-key|' +
+            dids_sorted[0].encode() + b'|' + dids_sorted[1].encode() + b'|' +
+            ephs_sorted[0] + b'|' + ephs_sorted[1]
+        )
+        return HKDF(algorithm=hashes.SHA256(), length=32, salt=None, info=info).derive(shared_secret)
+
+    @staticmethod
+    def _static_public_key(did: Did) -> ed25519.Ed25519PublicKey:
+        """Resolve a DID's static Ed25519 identity key for signature
+        verification. did:key is resolved algorithmically (no network
+        round trip needed)."""
+        doc = DidKeyMethod.resolve(did) if did.method == 'key' else DidWebMethod.resolve(did)
+        raw = doc.get_public_key(doc.authentication[0])
+        return ed25519.Ed25519PublicKey.from_public_bytes(raw)
+
+    def initiate_handshake(self, local_did: Did, local_private_key: ed25519.Ed25519PrivateKey,
+                          remote_did: Did) -> Tuple[str, bytes]:
+        """Initiate handshake: generate an ephemeral X25519 key and sign it
+        with the static Ed25519 identity key."""
+        session_id = secrets.token_hex(16)
+
+        ephemeral_key = x25519.X25519PrivateKey.generate()
+        ephemeral_public = self._raw(ephemeral_key.public_key())
+
+        timestamp = int(time.time())
+        signed_payload = (
+            ephemeral_public + str(remote_did).encode() +
+            session_id.encode() + struct.pack('!Q', timestamp)
+        )
+        signature = local_private_key.sign(signed_payload)
+
         message = {
             'type': 'handshake_init',
             'session_id': session_id,
@@ -523,10 +583,9 @@ class NoiseHandshake:
             'remote_did': str(remote_did),
             'ephemeral_key': ephemeral_public.hex(),
             'signature': signature.hex(),
-            'timestamp': int(time.time())
+            'timestamp': timestamp
         }
-        
-        # Store session state
+
         self.sessions[session_id] = {
             'local_did': local_did,
             'remote_did': remote_did,
@@ -534,98 +593,140 @@ class NoiseHandshake:
             'ephemeral_private_key': ephemeral_key,
             'state': 'initiated'
         }
-        
+
         return session_id, json.dumps(message).encode()
-    
+
     def respond_to_handshake(self, local_did: Did, local_private_key: ed25519.Ed25519PrivateKey,
                             init_message: bytes) -> Tuple[str, bytes]:
-        """Respond to handshake initiation"""
+        """Respond to a handshake initiation. Verifies the initiator's
+        signature, performs the X25519 DH exchange, and derives the session
+        key immediately (the responder already holds both ephemeral keys
+        at this point, so no further round trip is needed on this side)."""
         message = json.loads(init_message.decode())
-        
+
         if message['type'] != 'handshake_init':
             raise ValueError("Invalid handshake message")
-        
+
+        timestamp = message['timestamp']
+        if abs(int(time.time()) - timestamp) > self.HANDSHAKE_TTL_SECONDS:
+            raise ValueError("Handshake message expired or has an invalid timestamp")
+
         session_id = message['session_id']
-        remote_did = Did.parse(message['local_did'])  # Swap perspective
-        
-        # Generate our ephemeral key
-        ephemeral_key = ed25519.Ed25519PrivateKey.generate()
-        ephemeral_public = ephemeral_key.public_key().public_bytes(
-            encoding=serialization.Encoding.Raw,
-            format=serialization.PublicFormat.Raw
+        initiator_did = Did.parse(message['local_did'])
+        claimed_remote_did = Did.parse(message['remote_did'])
+        if str(claimed_remote_did) != str(local_did):
+            raise ValueError("Handshake is not addressed to this DID")
+
+        remote_ephemeral_bytes = bytes.fromhex(message['ephemeral_key'])
+        signature = bytes.fromhex(message['signature'])
+
+        # Authenticate the initiator before doing anything else with their data.
+        initiator_public_key = self._static_public_key(initiator_did)
+        signed_payload = (
+            remote_ephemeral_bytes + str(local_did).encode() +
+            session_id.encode() + struct.pack('!Q', timestamp)
         )
-        
-        # Create response
-        signature = local_private_key.sign(ephemeral_public + str(remote_did).encode())
-        
+        initiator_public_key.verify(signature, signed_payload)  # raises InvalidSignature on failure
+
+        # Generate our ephemeral key and perform the DH exchange.
+        ephemeral_key = x25519.X25519PrivateKey.generate()
+        ephemeral_public = self._raw(ephemeral_key.public_key())
+        remote_ephemeral_public_key = x25519.X25519PublicKey.from_public_bytes(remote_ephemeral_bytes)
+        shared_secret = ephemeral_key.exchange(remote_ephemeral_public_key)
+        session_key = self._session_key(
+            shared_secret, local_did, initiator_did, ephemeral_public, remote_ephemeral_bytes
+        )
+
+        response_timestamp = int(time.time())
+        response_signed_payload = (
+            ephemeral_public + str(initiator_did).encode() +
+            session_id.encode() + struct.pack('!Q', response_timestamp)
+        )
+        response_signature = local_private_key.sign(response_signed_payload)
+
         response = {
             'type': 'handshake_response',
             'session_id': session_id,
             'local_did': str(local_did),
             'ephemeral_key': ephemeral_public.hex(),
-            'signature': signature.hex(),
-            'timestamp': int(time.time())
+            'signature': response_signature.hex(),
+            'timestamp': response_timestamp
         }
-        
-        # Store session
+
         self.sessions[session_id] = {
             'local_did': local_did,
-            'remote_did': remote_did,
+            'remote_did': initiator_did,
             'local_private_key': local_private_key,
             'ephemeral_private_key': ephemeral_key,
-            'remote_ephemeral_key': bytes.fromhex(message['ephemeral_key']),
-            'state': 'responded'
+            'remote_ephemeral_key': remote_ephemeral_bytes,
+            'session_key': session_key,
+            'state': 'established'
         }
-        
+
         return session_id, json.dumps(response).encode()
-    
+
     def finalize_handshake(self, session_id: str, response_message: bytes) -> bytes:
-        """Finalize handshake and derive session key"""
+        """Called by the initiator once the responder's message arrives.
+        Verifies the responder's signature, performs the DH exchange, and
+        derives the same session key the responder already computed."""
         if session_id not in self.sessions:
             raise ValueError("Unknown session")
-        
+
         session = self.sessions[session_id]
+        if session.get('state') == 'established':
+            return session['session_key']  # idempotent
+
         message = json.loads(response_message.decode())
-        
-        # In a full Noise implementation, this would perform DH key exchange
-        # For demo, we'll derive a session key from the DIDs and ephemeral keys
-        remote_ephemeral = bytes.fromhex(message['ephemeral_key'])
-        
-        # Simplified session key derivation
-        key_material = (
-            str(session['local_did']).encode() +
-            str(session['remote_did']).encode() +
-            session['ephemeral_private_key'].public_key().public_bytes(
-                encoding=serialization.Encoding.Raw,
-                format=serialization.PublicFormat.Raw
-            ) +
-            remote_ephemeral
+        if message['type'] != 'handshake_response' or message['session_id'] != session_id:
+            raise ValueError("Invalid handshake response")
+
+        timestamp = message['timestamp']
+        if abs(int(time.time()) - timestamp) > self.HANDSHAKE_TTL_SECONDS:
+            raise ValueError("Handshake response expired or has an invalid timestamp")
+
+        local_did = session['local_did']
+        remote_did = session['remote_did']
+        remote_ephemeral_bytes = bytes.fromhex(message['ephemeral_key'])
+        signature = bytes.fromhex(message['signature'])
+
+        responder_public_key = self._static_public_key(remote_did)
+        signed_payload = (
+            remote_ephemeral_bytes + str(local_did).encode() +
+            session_id.encode() + struct.pack('!Q', timestamp)
         )
-        
-        session_key = hashlib.sha256(key_material).digest()
+        responder_public_key.verify(signature, signed_payload)
+
+        own_ephemeral_public = self._raw(session['ephemeral_private_key'].public_key())
+        remote_ephemeral_public_key = x25519.X25519PublicKey.from_public_bytes(remote_ephemeral_bytes)
+        shared_secret = session['ephemeral_private_key'].exchange(remote_ephemeral_public_key)
+        session_key = self._session_key(
+            shared_secret, local_did, remote_did, own_ephemeral_public, remote_ephemeral_bytes
+        )
+
+        session['remote_ephemeral_key'] = remote_ephemeral_bytes
         session['session_key'] = session_key
         session['state'] = 'established'
-        
+
         return session_key
 
 # ============================================================================
-# Message Encryption and Authentication  
+# Message Encryption and Authentication
 # ============================================================================
 
 class SecureMessaging:
     """End-to-end encrypted messaging using session keys"""
-    
+
     def __init__(self):
         self.cipher_suite = ChaCha20Poly1305
-    
-    def encrypt_message(self, session_key: bytes, plaintext: bytes, 
+
+    def encrypt_message(self, session_key: bytes, plaintext: bytes,
                        associated_data: bytes = b'') -> bytes:
         """Encrypt message with session key"""
         cipher = self.cipher_suite(session_key)
         nonce = secrets.token_bytes(12)  # ChaCha20Poly1305 uses 12-byte nonces
         ciphertext = cipher.encrypt(nonce, plaintext, associated_data)
         return nonce + ciphertext
-    
+
     def decrypt_message(self, session_key: bytes, encrypted_data: bytes,
                        associated_data: bytes = b'') -> bytes:
         """Decrypt message with session key"""
@@ -640,330 +741,33 @@ class SecureMessaging:
 
 class DhtNode:
     """Simplified DHT node for DID resolution"""
-    
+
     def __init__(self, node_id: bytes):
         self.node_id = node_id
         self.routing_table: Dict[bytes, str] = {}  # node_id -> endpoint
         self.storage: Dict[bytes, bytes] = {}  # key -> value
-    
+
     def distance(self, key: bytes) -> int:
         """XOR distance metric"""
         return int.from_bytes(
             bytes(a ^ b for a, b in zip(self.node_id, key)),
             byteorder='big'
         )
-    
+
     def store(self, key: bytes, value: bytes):
         """Store key-value pair"""
         self.storage[key] = value
-    
+
     def lookup(self, key: bytes) -> Optional[bytes]:
         """Lookup value by key"""
         return self.storage.get(key)
-    
+
     def find_closest_nodes(self, key: bytes, k: int = 3) -> List[bytes]:
         """Find k closest nodes to key"""
-        distances = [(self.distance(key ^ node_id), node_id) 
+        distances = [(self.distance(key ^ node_id), node_id)
                     for node_id in self.routing_table.keys()]
         distances.sort()
         return [node_id for _, node_id in distances[:k]]
-
-# ============================================================================
-# Demo and Testing
-# ============================================================================
-
-class UdnaDemo:
-    """Demonstration of UDNA functionality"""
-    
-    def __init__(self):
-        self.resolver = DidResolver()
-        self.handshake_handler = NoiseHandshake()
-        self.messaging = SecureMessaging()
-        self.rotation_manager = KeyRotationManager()
-        self.pairwise_manager = PairwiseDidManager()
-    
-    def demo_basic_operations(self):
-        """Demonstrate basic UDNA operations"""
-        print("=== UDNA Demo: Basic Operations ===\n")
-        
-        # 1. Generate did:key identities
-        print("1. Generating did:key identities...")
-        alice_did, alice_key = DidKeyMethod.generate()
-        bob_did, bob_key = DidKeyMethod.generate()
-        print(f"Alice DID: {alice_did}")
-        print(f"Bob DID: {bob_did}\n")
-        
-        # 2. Resolve DID documents
-        print("2. Resolving DID documents...")
-        alice_doc = DidKeyMethod.resolve(alice_did)
-        bob_doc = DidKeyMethod.resolve(bob_did)
-        print(f"Alice doc created: {alice_doc.created}")
-        print(f"Bob doc created: {bob_doc.created}\n")
-        
-        # 3. Create and encode UDNA addresses
-        print("3. Creating UDNA addresses...")
-        alice_addr = UdnaAddress(
-            did=alice_did,
-            facet_id=0x02,  # Messaging facet
-            nonce=secrets.randbits(64)
-        )
-        
-        # Encode and decode address
-        encoded = alice_addr.encode()
-        decoded = UdnaAddress.decode(encoded)
-        print(f"Address encoding size: {len(encoded)} bytes")
-        print(f"Decoded DID matches: {decoded.did == alice_did}\n")
-        
-        # 4. Generate pairwise DIDs
-        print("4. Generating pairwise DIDs...")
-        alice_pairwise, alice_pairwise_key = self.pairwise_manager.generate_pairwise_did(
-            alice_did, bob_did
-        )
-        bob_pairwise, bob_pairwise_key = self.pairwise_manager.generate_pairwise_did(
-            bob_did, alice_did
-        )
-        print(f"Alice pairwise: {alice_pairwise}")
-        print(f"Bob pairwise: {bob_pairwise}\n")
-        
-        # 5. Perform cryptographic handshake
-        print("5. Performing Noise handshake...")
-        session_id, init_msg = self.handshake_handler.initiate_handshake(
-            alice_did, alice_key, bob_did
-        )
-        
-        _, response_msg = self.handshake_handler.respond_to_handshake(
-            bob_did, bob_key, init_msg
-        )
-        
-        session_key = self.handshake_handler.finalize_handshake(session_id, response_msg)
-        print(f"Session established: {session_key.hex()[:16]}...\n")
-        
-        # 6. Send encrypted message
-        print("6. Sending encrypted message...")
-        plaintext = b"Hello Bob, this is a secure DID-authenticated message!"
-        encrypted = self.messaging.encrypt_message(session_key, plaintext)
-        decrypted = self.messaging.decrypt_message(session_key, encrypted)
-        print(f"Message encrypted: {len(encrypted)} bytes")
-        print(f"Decryption successful: {decrypted == plaintext}\n")
-        
-        # 7. Demonstrate key rotation
-        print("7. Demonstrating key rotation...")
-        new_alice_key = ed25519.Ed25519PrivateKey.generate()
-        rotation_proof = self.rotation_manager.rotate_key(
-            alice_did, alice_key, new_alice_key, reason=1
-        )
-        
-        # Verify rotation proof
-        alice_public = alice_key.public_key()
-        is_valid = rotation_proof.verify(alice_public)
-        print(f"Key rotation proof valid: {is_valid}\n")
-        
-        return {
-            'alice_did': alice_did,
-            'bob_did': bob_did,
-            'session_key': session_key,
-            'pairwise_dids': (alice_pairwise, bob_pairwise)
-        }
-    
-    def demo_performance_benchmarks(self):
-        """Run performance benchmarks"""
-        print("=== UDNA Demo: Performance Benchmarks ===\n")
-        
-        # DID resolution benchmark
-        test_did, _ = DidKeyMethod.generate()
-        
-        import time
-        iterations = 1000
-        
-        # Benchmark DID resolution
-        start = time.perf_counter()
-        for _ in range(iterations):
-            DidKeyMethod.resolve(test_did)
-        end = time.perf_counter()
-        
-        avg_resolution = (end - start) / iterations * 1000000  # microseconds
-        print(f"DID Resolution (algorithmic): {avg_resolution:.1f} μs average")
-        
-        # Benchmark address encoding/decoding
-        addr = UdnaAddress(did=test_did, nonce=secrets.randbits(64))
-        
-        start = time.perf_counter()
-        for _ in range(iterations):
-            encoded = addr.encode()
-            UdnaAddress.decode(encoded)
-        end = time.perf_counter()
-        
-        avg_encode_decode = (end - start) / iterations * 1000000
-        print(f"Address Encode/Decode: {avg_encode_decode:.1f} μs average")
-        
-        # Benchmark signature verification
-        private_key = ed25519.Ed25519PrivateKey.generate()
-        public_key = private_key.public_key()
-        message = b"test message for signature benchmarking"
-        signature = private_key.sign(message)
-        
-        start = time.perf_counter()
-        for _ in range(iterations):
-            try:
-                public_key.verify(signature, message)
-            except:
-                pass
-        end = time.perf_counter()
-        
-        avg_verify = (end - start) / iterations * 1000000
-        print(f"Signature Verification: {avg_verify:.1f} μs average\n")
-
-def main():
-    """Run UDNA demonstration"""
-    demo = UdnaDemo()
-    
-    try:
-        # Run basic functionality demo
-        results = demo.demo_basic_operations()
-        
-        # Run performance benchmarks
-        demo.demo_performance_benchmarks()
-        
-        # Additional advanced demos
-        demo.demo_capability_system()
-        demo.demo_relay_contracts()
-        demo.demo_anonymous_introduction()
-        
-    except Exception as e:
-        print(f"Demo error: {e}")
-        import traceback
-        traceback.print_exc()
-
-    def demo_capability_system(self):
-        """Demonstrate Zero-Knowledge Capability (ZCAP) system"""
-        print("=== UDNA Demo: Capability-Based Authorization ===\n")
-        
-        # Generate identities
-        alice_did, alice_key = DidKeyMethod.generate()
-        bob_did, bob_key = DidKeyMethod.generate()
-        service_did, service_key = DidKeyMethod.generate()
-        
-        print(f"Alice (client): {alice_did}")
-        print(f"Bob (delegate): {bob_did}")  
-        print(f"Service: {service_did}\n")
-        
-        # Create capability
-        capability = ZeroKnowledgeCapability(
-            controller=str(alice_did),
-            subject=str(service_did),
-            action=['read', 'write'],
-            resource='/api/documents/*',
-            expires=int(time.time()) + 3600,  # 1 hour
-            nonce=secrets.token_hex(16)
-        )
-        
-        # Sign capability
-        capability.sign(alice_key)
-        print(f"Capability created: {capability.id}")
-        print(f"Actions: {capability.action}")
-        print(f"Resource: {capability.resource}\n")
-        
-        # Delegate capability to Bob
-        delegated_cap = capability.delegate(bob_did, alice_key, ['read'])
-        print(f"Delegated to Bob: {delegated_cap.id}")
-        print(f"Delegated actions: {delegated_cap.action}\n")
-        
-        # Verify capability chain
-        is_valid = delegated_cap.verify_chain([capability])
-        print(f"Delegation chain valid: {is_valid}\n")
-        
-        return capability, delegated_cap
-    
-    def demo_relay_contracts(self):
-        """Demonstrate relay contracts for NAT traversal"""
-        print("=== UDNA Demo: Relay Contracts ===\n")
-        
-        # Generate identities
-        client_did, client_key = DidKeyMethod.generate()
-        relay_did, relay_key = DidKeyMethod.generate()
-        
-        print(f"Client: {client_did}")
-        print(f"Relay: {relay_did}\n")
-        
-        # Create relay contract
-        contract = RelayContract(
-            relay_did=relay_did,
-            client_did=client_did,
-            permitted_facets=[0x01, 0x02, 0x03],  # Control, Messaging, Telemetry
-            rate_limits=RateConfig(
-                requests_per_second=100,
-                bandwidth_mbps=10,
-                concurrent_connections=50
-            ),
-            fee_structure=FeeConfig(
-                base_fee_sats=100,
-                per_mb_sats=10,
-                per_hour_sats=50
-            ),
-            valid_until=int(time.time()) + 86400,  # 24 hours
-            signatures=[]
-        )
-        
-        # Multi-party signatures
-        client_sig = contract.sign(client_key, str(client_did))
-        relay_sig = contract.sign(relay_key, str(relay_did))
-        
-        print(f"Contract ID: {contract.contract_id()}")
-        print(f"Permitted facets: {contract.permitted_facets}")
-        print(f"Rate limit: {contract.rate_limits.requests_per_second} req/s")
-        print(f"Valid until: {time.ctime(contract.valid_until)}")
-        print(f"Signatures: {len(contract.signatures)}\n")
-        
-        # Verify contract
-        is_valid = contract.verify_signatures()
-        print(f"Contract signatures valid: {is_valid}\n")
-        
-        return contract
-    
-    def demo_anonymous_introduction(self):
-        """Demonstrate anonymous introduction protocol"""
-        print("=== UDNA Demo: Anonymous Introduction ===\n")
-        
-        # Generate identities
-        alice_did, alice_key = DidKeyMethod.generate()
-        bob_did, bob_key = DidKeyMethod.generate()
-        rendezvous_did, rendezvous_key = DidKeyMethod.generate()
-        
-        print(f"Alice (initiator): {alice_did}")
-        print(f"Bob (responder): {bob_did}")
-        print(f"Rendezvous: {rendezvous_did}\n")
-        
-        # Create anonymous introduction request
-        intro_request = AnonymousIntroduction(
-            rendezvous_did=rendezvous_did,
-            target_did=bob_did,
-            introduction_purpose="secure_messaging",
-            capabilities_requested=['read', 'write'],
-            anonymity_level=2,  # Medium anonymity
-            nonce=secrets.token_hex(16)
-        )
-        
-        # Alice signs with ephemeral key
-        ephemeral_key = ed25519.Ed25519PrivateKey.generate()
-        intro_request.sign(ephemeral_key)
-        
-        print(f"Introduction request: {intro_request.request_id}")
-        print(f"Target: {intro_request.target_did}")
-        print(f"Purpose: {intro_request.introduction_purpose}")
-        print(f"Anonymity level: {intro_request.anonymity_level}\n")
-        
-        # Bob evaluates introduction against policy
-        policy_result = intro_request.evaluate_policy(bob_did, bob_key)
-        print(f"Policy evaluation: {policy_result.decision}")
-        print(f"Reason: {policy_result.reason}\n")
-        
-        if policy_result.decision == "accept":
-            # Reveal real identity
-            alice_revelation = intro_request.reveal_identity(alice_did, alice_key)
-            print(f"Identity revealed: {alice_revelation.real_did}")
-            print(f"Verification: {alice_revelation.verify()}\n")
-        
-        return intro_request
 
 # ============================================================================
 # Advanced Components
@@ -980,25 +784,25 @@ class ZeroKnowledgeCapability:
     nonce: str       # Unique nonce
     parent_id: Optional[str] = None  # Parent capability ID for delegation
     signature: bytes = b''
-    
+
     @property
     def id(self) -> str:
         """Generate capability ID"""
         content = f"{self.controller}:{self.subject}:{':'.join(self.action)}:{self.resource}:{self.expires}:{self.nonce}"
         return hashlib.sha256(content.encode()).hexdigest()
-    
+
     def sign(self, private_key: ed25519.Ed25519PrivateKey):
         """Sign capability with controller's key"""
         message = f"{self.id}:{self.controller}:{self.subject}".encode()
         self.signature = private_key.sign(message)
-    
-    def delegate(self, delegate_did: Did, controller_key: ed25519.Ed25519PrivateKey, 
+
+    def delegate(self, delegate_did: Did, controller_key: ed25519.Ed25519PrivateKey,
                  delegated_actions: List[str]) -> 'ZeroKnowledgeCapability':
         """Create delegated capability"""
         # Ensure delegated actions are subset of parent actions
         if not all(action in self.action for action in delegated_actions):
             raise ValueError("Cannot delegate actions not possessed")
-        
+
         delegated_cap = ZeroKnowledgeCapability(
             controller=str(delegate_did),
             subject=self.subject,
@@ -1008,30 +812,30 @@ class ZeroKnowledgeCapability:
             nonce=secrets.token_hex(16),
             parent_id=self.id
         )
-        
+
         # Sign delegation
         delegated_cap.sign(controller_key)
-        
+
         return delegated_cap
-    
+
     def verify_chain(self, parent_capabilities: List['ZeroKnowledgeCapability']) -> bool:
         """Verify capability delegation chain"""
         if not self.parent_id:
             return True  # Root capability
-        
+
         # Find parent capability
         parent = next((cap for cap in parent_capabilities if cap.id == self.parent_id), None)
         if not parent:
             return False
-        
+
         # Verify parent is still valid
         if parent.expires < time.time():
             return False
-        
+
         # Verify actions are subset of parent
         if not all(action in parent.action for action in self.action):
             return False
-        
+
         # Recursively verify parent chain
         return parent.verify_chain(parent_capabilities)
 
@@ -1059,12 +863,12 @@ class RelayContract:
     fee_structure: FeeConfig
     valid_until: int
     signatures: List[Tuple[str, bytes]]  # (signer_did, signature) pairs
-    
+
     def contract_id(self) -> str:
         """Generate unique contract ID"""
         content = f"{self.relay_did}:{self.client_did}:{self.valid_until}"
         return hashlib.sha256(content.encode()).hexdigest()
-    
+
     def sign(self, private_key: ed25519.Ed25519PrivateKey, signer_did: str) -> bytes:
         """Add signature to contract"""
         message = (
@@ -1074,11 +878,11 @@ class RelayContract:
             f"{self.rate_limits.requests_per_second}:"
             f"{self.valid_until}"
         ).encode()
-        
+
         signature = private_key.sign(message)
         self.signatures.append((signer_did, signature))
         return signature
-    
+
     def verify_signatures(self) -> bool:
         """Verify all contract signatures (simplified)"""
         # In a real implementation, this would resolve DIDs and verify signatures
@@ -1101,7 +905,7 @@ class IdentityRevelation:
     real_did: Did
     ephemeral_did: Did
     proof_signature: bytes
-    
+
     def verify(self) -> bool:
         """Verify identity revelation proof"""
         # Simplified verification
@@ -1117,18 +921,18 @@ class AnonymousIntroduction:
     anonymity_level: int  # 0=none, 1=low, 2=medium, 3=high
     nonce: str
     signature: bytes = b''
-    
+
     @property
     def request_id(self) -> str:
         """Generate request ID"""
         content = f"{self.rendezvous_did}:{self.target_did}:{self.nonce}"
         return hashlib.sha256(content.encode()).hexdigest()
-    
+
     def sign(self, ephemeral_key: ed25519.Ed25519PrivateKey):
         """Sign introduction request with ephemeral key"""
         message = f"{self.request_id}:{self.target_did}:{self.introduction_purpose}".encode()
         self.signature = ephemeral_key.sign(message)
-    
+
     def evaluate_policy(self, target_did: Did, target_key: ed25519.Ed25519PrivateKey) -> PolicyResult:
         """Evaluate introduction against access policy"""
         # Simplified policy evaluation
@@ -1139,21 +943,321 @@ class AnonymousIntroduction:
             )
         else:
             return PolicyResult(
-                decision="reject", 
+                decision="reject",
                 reason="Unknown introduction purpose"
             )
-    
+
     def reveal_identity(self, real_did: Did, real_key: ed25519.Ed25519PrivateKey) -> IdentityRevelation:
         """Reveal real identity after policy acceptance"""
         proof_message = f"{self.request_id}:{real_did}".encode()
         proof_signature = real_key.sign(proof_message)
-        
+
         return IdentityRevelation(
             request_id=self.request_id,
             real_did=real_did,
             ephemeral_did=Did.parse(f"did:key:ephemeral_{self.nonce}"),
             proof_signature=proof_signature
         )
+
+# ============================================================================
+# Demo and Testing
+# ============================================================================
+
+class UdnaDemo:
+    """Demonstration of UDNA functionality"""
+
+    def __init__(self):
+        self.resolver = DidResolver()
+        self.handshake_handler = NoiseHandshake()
+        self.messaging = SecureMessaging()
+        self.rotation_manager = KeyRotationManager()
+        self.pairwise_manager = PairwiseDidManager()
+
+    def demo_basic_operations(self):
+        """Demonstrate basic UDNA operations"""
+        print("=== UDNA Demo: Basic Operations ===\n")
+
+        # 1. Generate did:key identities
+        print("1. Generating did:key identities...")
+        alice_did, alice_key = DidKeyMethod.generate()
+        bob_did, bob_key = DidKeyMethod.generate()
+        print(f"Alice DID: {alice_did}")
+        print(f"Bob DID: {bob_did}\n")
+
+        # 2. Resolve DID documents
+        print("2. Resolving DID documents...")
+        alice_doc = DidKeyMethod.resolve(alice_did)
+        bob_doc = DidKeyMethod.resolve(bob_did)
+        print(f"Alice doc created: {alice_doc.created}")
+        print(f"Bob doc created: {bob_doc.created}\n")
+
+        # 3. Create and encode UDNA addresses
+        print("3. Creating UDNA addresses...")
+        alice_addr = UdnaAddress(
+            did=alice_did,
+            facet_id=0x02,  # Messaging facet
+            nonce=secrets.randbits(64)
+        )
+
+        # Encode and decode address
+        encoded = alice_addr.encode()
+        decoded = UdnaAddress.decode(encoded)
+        print(f"Address encoding size: {len(encoded)} bytes")
+        print(f"Decoded DID matches: {decoded.did == alice_did}\n")
+
+        # 4. Generate pairwise DIDs
+        print("4. Generating pairwise DIDs...")
+        alice_pairwise, alice_pairwise_key = self.pairwise_manager.generate_pairwise_did(
+            alice_did, bob_did
+        )
+        bob_pairwise, bob_pairwise_key = self.pairwise_manager.generate_pairwise_did(
+            bob_did, alice_did
+        )
+        print(f"Alice pairwise: {alice_pairwise}")
+        print(f"Bob pairwise: {bob_pairwise}\n")
+
+        # 5. Perform cryptographic handshake
+        print("5. Performing Noise-style handshake...")
+        session_id, init_msg = self.handshake_handler.initiate_handshake(
+            alice_did, alice_key, bob_did
+        )
+
+        _, response_msg = self.handshake_handler.respond_to_handshake(
+            bob_did, bob_key, init_msg
+        )
+
+        session_key = self.handshake_handler.finalize_handshake(session_id, response_msg)
+        bob_session_key = self.handshake_handler.sessions[session_id]['session_key']
+        print(f"Session established: {session_key.hex()[:16]}...")
+        print(f"Both sides agree on session key: {session_key == bob_session_key}\n")
+
+        # 6. Send encrypted message
+        print("6. Sending encrypted message...")
+        plaintext = b"Hello Bob, this is a secure DID-authenticated message!"
+        encrypted = self.messaging.encrypt_message(session_key, plaintext)
+        decrypted = self.messaging.decrypt_message(session_key, encrypted)
+        print(f"Message encrypted: {len(encrypted)} bytes")
+        print(f"Decryption successful: {decrypted == plaintext}\n")
+
+        # 7. Demonstrate key rotation
+        print("7. Demonstrating key rotation...")
+        new_alice_key = ed25519.Ed25519PrivateKey.generate()
+        rotation_proof = self.rotation_manager.rotate_key(
+            alice_did, alice_key, new_alice_key, reason=1
+        )
+
+        # Verify rotation proof
+        alice_public = alice_key.public_key()
+        is_valid = rotation_proof.verify(alice_public)
+        print(f"Key rotation proof valid: {is_valid}\n")
+
+        return {
+            'alice_did': alice_did,
+            'bob_did': bob_did,
+            'session_key': session_key,
+            'pairwise_dids': (alice_pairwise, bob_pairwise)
+        }
+
+    def demo_performance_benchmarks(self):
+        """Run performance benchmarks"""
+        print("=== UDNA Demo: Performance Benchmarks ===\n")
+
+        # DID resolution benchmark
+        test_did, _ = DidKeyMethod.generate()
+
+        iterations = 1000
+
+        # Benchmark DID resolution
+        start = time.perf_counter()
+        for _ in range(iterations):
+            DidKeyMethod.resolve(test_did)
+        end = time.perf_counter()
+
+        avg_resolution = (end - start) / iterations * 1000000  # microseconds
+        print(f"DID Resolution (algorithmic): {avg_resolution:.1f} \u03bcs average")
+
+        # Benchmark address encoding/decoding
+        addr = UdnaAddress(did=test_did, nonce=secrets.randbits(64))
+
+        start = time.perf_counter()
+        for _ in range(iterations):
+            encoded = addr.encode()
+            UdnaAddress.decode(encoded)
+        end = time.perf_counter()
+
+        avg_encode_decode = (end - start) / iterations * 1000000
+        print(f"Address Encode/Decode: {avg_encode_decode:.1f} \u03bcs average")
+
+        # Benchmark signature verification
+        private_key = ed25519.Ed25519PrivateKey.generate()
+        public_key = private_key.public_key()
+        message = b"test message for signature benchmarking"
+        signature = private_key.sign(message)
+
+        start = time.perf_counter()
+        for _ in range(iterations):
+            try:
+                public_key.verify(signature, message)
+            except Exception:
+                pass
+        end = time.perf_counter()
+
+        avg_verify = (end - start) / iterations * 1000000
+        print(f"Signature Verification: {avg_verify:.1f} \u03bcs average\n")
+
+    def demo_capability_system(self):
+        """Demonstrate Zero-Knowledge Capability (ZCAP) system"""
+        print("=== UDNA Demo: Capability-Based Authorization ===\n")
+
+        # Generate identities
+        alice_did, alice_key = DidKeyMethod.generate()
+        bob_did, bob_key = DidKeyMethod.generate()
+        service_did, service_key = DidKeyMethod.generate()
+
+        print(f"Alice (client): {alice_did}")
+        print(f"Bob (delegate): {bob_did}")
+        print(f"Service: {service_did}\n")
+
+        # Create capability
+        capability = ZeroKnowledgeCapability(
+            controller=str(alice_did),
+            subject=str(service_did),
+            action=['read', 'write'],
+            resource='/api/documents/*',
+            expires=int(time.time()) + 3600,  # 1 hour
+            nonce=secrets.token_hex(16)
+        )
+
+        # Sign capability
+        capability.sign(alice_key)
+        print(f"Capability created: {capability.id}")
+        print(f"Actions: {capability.action}")
+        print(f"Resource: {capability.resource}\n")
+
+        # Delegate capability to Bob
+        delegated_cap = capability.delegate(bob_did, alice_key, ['read'])
+        print(f"Delegated to Bob: {delegated_cap.id}")
+        print(f"Delegated actions: {delegated_cap.action}\n")
+
+        # Verify capability chain
+        is_valid = delegated_cap.verify_chain([capability])
+        print(f"Delegation chain valid: {is_valid}\n")
+
+        return capability, delegated_cap
+
+    def demo_relay_contracts(self):
+        """Demonstrate relay contracts for NAT traversal"""
+        print("=== UDNA Demo: Relay Contracts ===\n")
+
+        # Generate identities
+        client_did, client_key = DidKeyMethod.generate()
+        relay_did, relay_key = DidKeyMethod.generate()
+
+        print(f"Client: {client_did}")
+        print(f"Relay: {relay_did}\n")
+
+        # Create relay contract
+        contract = RelayContract(
+            relay_did=relay_did,
+            client_did=client_did,
+            permitted_facets=[0x01, 0x02, 0x03],  # Control, Messaging, Telemetry
+            rate_limits=RateConfig(
+                requests_per_second=100,
+                bandwidth_mbps=10,
+                concurrent_connections=50
+            ),
+            fee_structure=FeeConfig(
+                base_fee_sats=100,
+                per_mb_sats=10,
+                per_hour_sats=50
+            ),
+            valid_until=int(time.time()) + 86400,  # 24 hours
+            signatures=[]
+        )
+
+        # Multi-party signatures
+        client_sig = contract.sign(client_key, str(client_did))
+        relay_sig = contract.sign(relay_key, str(relay_did))
+
+        print(f"Contract ID: {contract.contract_id()}")
+        print(f"Permitted facets: {contract.permitted_facets}")
+        print(f"Rate limit: {contract.rate_limits.requests_per_second} req/s")
+        print(f"Valid until: {time.ctime(contract.valid_until)}")
+        print(f"Signatures: {len(contract.signatures)}\n")
+
+        # Verify contract
+        is_valid = contract.verify_signatures()
+        print(f"Contract signatures valid: {is_valid}\n")
+
+        return contract
+
+    def demo_anonymous_introduction(self):
+        """Demonstrate anonymous introduction protocol"""
+        print("=== UDNA Demo: Anonymous Introduction ===\n")
+
+        # Generate identities
+        alice_did, alice_key = DidKeyMethod.generate()
+        bob_did, bob_key = DidKeyMethod.generate()
+        rendezvous_did, rendezvous_key = DidKeyMethod.generate()
+
+        print(f"Alice (initiator): {alice_did}")
+        print(f"Bob (responder): {bob_did}")
+        print(f"Rendezvous: {rendezvous_did}\n")
+
+        # Create anonymous introduction request
+        intro_request = AnonymousIntroduction(
+            rendezvous_did=rendezvous_did,
+            target_did=bob_did,
+            introduction_purpose="secure_messaging",
+            capabilities_requested=['read', 'write'],
+            anonymity_level=2,  # Medium anonymity
+            nonce=secrets.token_hex(16)
+        )
+
+        # Alice signs with ephemeral key
+        ephemeral_key = ed25519.Ed25519PrivateKey.generate()
+        intro_request.sign(ephemeral_key)
+
+        print(f"Introduction request: {intro_request.request_id}")
+        print(f"Target: {intro_request.target_did}")
+        print(f"Purpose: {intro_request.introduction_purpose}")
+        print(f"Anonymity level: {intro_request.anonymity_level}\n")
+
+        # Bob evaluates introduction against policy
+        policy_result = intro_request.evaluate_policy(bob_did, bob_key)
+        print(f"Policy evaluation: {policy_result.decision}")
+        print(f"Reason: {policy_result.reason}\n")
+
+        if policy_result.decision == "accept":
+            # Reveal real identity
+            alice_revelation = intro_request.reveal_identity(alice_did, alice_key)
+            print(f"Identity revealed: {alice_revelation.real_did}")
+            print(f"Verification: {alice_revelation.verify()}\n")
+
+        return intro_request
+
+
+def main():
+    """Run UDNA demonstration"""
+    demo = UdnaDemo()
+
+    try:
+        # Run basic functionality demo
+        results = demo.demo_basic_operations()
+
+        # Run performance benchmarks
+        demo.demo_performance_benchmarks()
+
+        # Additional advanced demos
+        demo.demo_capability_system()
+        demo.demo_relay_contracts()
+        demo.demo_anonymous_introduction()
+
+    except Exception as e:
+        print(f"Demo error: {e}")
+        import traceback
+        traceback.print_exc()
+
 
 if __name__ == "__main__":
     main()

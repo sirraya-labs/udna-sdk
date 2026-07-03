@@ -770,6 +770,7 @@ twine upload dist/*
 | 1.0.1 | 2026-04-04 | Fix imports, add AddressFlags |
 | 1.0.2 | 2026-04-04 | Production ready release |
 | 1.1.0 | 2026-04-04 | Key rotation, export/import, pairwise DIDs, secure messaging |
+| 1.2.0 | 2026-07-03 | Security fix
 
 ---
 
