@@ -30,10 +30,13 @@
 - [License](#license)
 
 ---
+⚠️ Development Status: Proof of Concept
+
+This SDK is currently a Proof of Concept (PoC) for the UDNA Protocol and remains under active development. It may undergo substantial changes to its API, architecture, and underlying specifications without prior notice. While functional for experimentation and evaluation, it is not yet recommended for production deployments. We welcome feedback, contributions, and early adoption testing, but please plan accordingly for potential breaking changes in future releases.
 
 ## Overview
 
-The Sirraya Labs UDNA SDK provides a production-ready implementation of Universal DID-Native Addressing, enabling decentralized identity management and secure communication.
+The Sirraya Labs UDNA SDK provides an implementation of Universal DID-Native Addressing, enabling decentralized identity management and secure communication.
 
 ### Key Capabilities
 

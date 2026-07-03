@@ -6,7 +6,7 @@ with open("README.md", "r", encoding="utf-8") as fh:
 setup(
     # Package name (PyPI)
     name="sirraya-udna-sdk",
-    version="1.2.0",
+    version="1.2.1",
 
     # Author (Copyright Holder)
     author="Amir Hameed Mir",
